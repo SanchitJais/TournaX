@@ -262,10 +262,47 @@ test('room credentials stay hidden until their reveal time', async () => {
   assert.equal(publicMatch.room_id, null);
   assert.equal(publicMatch.credentials.revealed, false);
 
-  // Move the reveal into the past and it opens up.
+  // Once the reveal time passes the match reports itself as released, but the
+  // details themselves are for registered participants -- not the open web.
   await api('PATCH', `/api/matches/${matchId}`, { credentials_reveal_at: localStamp(-60_000) });
-  const shown = await asAnonymous(() => api('GET', '/api/public/t/test-championship/matches'));
-  assert.equal(shown.body.matches.find((m) => m.id === matchId).room_id, '998877');
+  const released = await asAnonymous(() => api('GET', '/api/public/t/test-championship/matches'));
+  const afterReveal = released.body.matches.find((m) => m.id === matchId);
+  assert.equal(afterReveal.room_id, null, 'spectators never get the room details');
+  assert.equal(afterReveal.credentials.restricted, true);
+  assert.equal(afterReveal.credentials.reason, 'participants_only');
+
+  // The organizer still sees them.
+  const stillAdmin = await api('GET', `/api/matches/${matchId}`);
+  assert.equal(stillAdmin.body.match.room_id, '998877');
+});
+
+test('room credentials open automatically N minutes before the match', async () => {
+  const list = await api('GET', `/api/tournaments/${tournamentId}/matches`);
+  const matchId = list.body.matches[2].id;
+
+  // Match starts in 10 minutes, details unlock 15 minutes before => already due.
+  await api('PATCH', `/api/matches/${matchId}`, {
+    scheduled_at: localStamp(10 * 60_000),
+    room_id: '551122',
+    room_password: 'timed',
+    reveal_policy: 'minutes',
+    reveal_minutes_before: 15,
+    credentials_reveal_at: null,
+  });
+  const due = await asAnonymous(() => api('GET', '/api/public/t/test-championship/matches'));
+  assert.equal(due.body.matches.find((m) => m.id === matchId).credentials.reason, 'participants_only');
+
+  // Same match, but the window has not opened yet.
+  await api('PATCH', `/api/matches/${matchId}`, {
+    scheduled_at: localStamp(6 * 60 * 60_000),
+    reveal_policy: 'minutes',
+    reveal_minutes_before: 15,
+  });
+  const early = await asAnonymous(() => api('GET', '/api/public/t/test-championship/matches'));
+  const notYet = early.body.matches.find((m) => m.id === matchId);
+  assert.equal(notYet.credentials.revealed, false);
+  assert.equal(notYet.credentials.reason, 'scheduled');
+  assert.ok(notYet.credentials.reveal_at, 'tells viewers when it unlocks');
 });
 
 test('entering results computes every point column automatically', async () => {

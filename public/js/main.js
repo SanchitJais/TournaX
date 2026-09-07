@@ -23,6 +23,13 @@ import settingsView from './views/settings.js';
 import peopleView from './views/people.js';
 import activityView from './views/activity.js';
 import publicSite from './views/publicSite.js';
+// Platform tier
+import platformView from './views/platform.js';
+import playerView from './views/player.js';
+import profilesView from './views/profiles.js';
+import registrationView from './views/registration.js';
+import adminRegistrations from './views/adminRegistrations.js';
+import { bindGlobalSearch } from './views/chrome.js';
 
 // ---------------------------------------------------------------- app state --
 export const state = {
@@ -46,6 +53,7 @@ const ROUTES = [
   { path: '/admin/templates', view: settingsView, chrome: 'plain', key: 'templates' },
 
   { path: '/admin/t/:id', view: dashboard, chrome: 'admin', key: 'dashboard' },
+  { path: '/admin/t/:id/registrations', view: adminRegistrations, chrome: 'admin', key: 'registrations' },
   { path: '/admin/t/:id/teams', view: teamsView, chrome: 'admin', key: 'teams' },
   { path: '/admin/t/:id/fixtures', view: fixturesView, chrome: 'admin', key: 'fixtures' },
   { path: '/admin/t/:id/matches', view: matchesView, chrome: 'admin', key: 'matches' },
@@ -56,10 +64,26 @@ const ROUTES = [
   { path: '/admin/t/:id/people', view: peopleView, chrome: 'admin', key: 'people' },
   { path: '/admin/t/:id/settings', view: settingsView, chrome: 'admin', key: 'settings' },
 
-  { path: '/', view: publicSite, chrome: 'public', key: 'browse' },
+  // ---- platform / public ---------------------------------------------------
+  { path: '/', view: platformView, chrome: 'public', key: 'home' },
+  { path: '/tournaments', view: platformView, chrome: 'public', key: 'discover' },
+  { path: '/teams', view: platformView, chrome: 'public', key: 'teams' },
+
+  { path: '/me', view: playerView, chrome: 'public', key: 'me' },
+  { path: '/me/:section', view: playerView, chrome: 'public', key: 'me' },
+
+  { path: '/team/:slug', view: profilesView, chrome: 'public', key: 'team' },
+  { path: '/player/:playerId', view: profilesView, chrome: 'public', key: 'player' },
+
+  // `register` is declared before the catch-all section route.
+  { path: '/tournament/:slug/register', view: registrationView, chrome: 'public', key: 'register' },
+  { path: '/tournament/:slug', view: publicSite, chrome: 'public', key: 'tournament' },
+  { path: '/tournament/:slug/:section', view: publicSite, chrome: 'public', key: 'tournament-section' },
+
+  // Legacy links from before the platform upgrade still resolve.
   { path: '/t/match/:matchId', view: publicSite, chrome: 'public', key: 'match' },
-  { path: '/t/:slug', view: publicSite, chrome: 'public', key: 'home' },
-  { path: '/t/:slug/:section', view: publicSite, chrome: 'public', key: 'section' },
+  { path: '/t/:slug', view: publicSite, chrome: 'public', key: 'tournament' },
+  { path: '/t/:slug/:section', view: publicSite, chrome: 'public', key: 'tournament-section' },
 ];
 
 const compiled = ROUTES.map((route) => {
@@ -102,6 +126,7 @@ const NAV_SECTIONS = [
     heading: 'Manage',
     items: [
       { key: 'dashboard', label: 'Dashboard', icon: 'dashboard', to: '' },
+      { key: 'registrations', label: 'Registrations', icon: 'flag', to: '/registrations' },
       { key: 'teams', label: 'Teams', icon: 'teams', to: '/teams' },
       { key: 'fixtures', label: 'Fixtures', icon: 'calendar', to: '/fixtures' },
       { key: 'matches', label: 'Match Center', icon: 'play', to: '/matches' },
@@ -229,7 +254,13 @@ async function renderRoute() {
   }
 
   const { route, params } = matched;
-  const ctx = { params, query: Object.fromEntries(new URLSearchParams(location.search)), navigate, state };
+  const ctx = {
+    params,
+    query: Object.fromEntries(new URLSearchParams(location.search)),
+    navigate,
+    state,
+    route,
+  };
   state.route = route;
 
   // Admin screens need the tournament and the caller's abilities loaded first.
@@ -286,6 +317,8 @@ async function renderRoute() {
     if (token !== renderToken) return;
     host.innerHTML = route.view.render(data, ctx);
     route.view.mounted?.(data, ctx, host);
+    // Public pages render their own nav, so bind its search after each render.
+    if (route.chrome === 'public') bindGlobalSearch(host);
     document.title = route.view.title
       ? `${typeof route.view.title === 'function' ? route.view.title(data, ctx) : route.view.title} - Tournament Manager`
       : 'Tournament Manager';

@@ -7,9 +7,20 @@ import {
 import { ROLES, ROLE_LABELS } from '../config.js';
 import { badRequest, clearCookie, conflict, forbidden, notFound, setCookie } from '../lib/http.js';
 import { recordAudit } from '../services/audit.js';
+import { rateLimit, resetLimit } from '../lib/ratelimit.js';
+
+// Blunts credential stuffing without getting in an honest user's way:
+// a successful sign-in clears the counter.
+const loginLimiter = rateLimit('login', {
+  limit: 12, windowMs: 10 * 60_000,
+  message: 'Too many sign-in attempts. Wait a few minutes and try again.',
+});
+const signupLimiter = rateLimit('signup', { limit: 8, windowMs: 60 * 60_000 });
 
 export default function register(router) {
-  router.post('/api/auth/login', ({ body, req, res }) => {
+  router.post('/api/auth/login', (ctx) => {
+    loginLimiter(ctx);
+    const { body, req, res } = ctx;
     const email = String(body.email || '').trim().toLowerCase();
     const user = get('SELECT * FROM users WHERE email = ?', [email]);
     // Same message either way -- do not confirm which emails exist.
@@ -18,6 +29,7 @@ export default function register(router) {
     }
     if (!user.is_active) throw forbidden('This account has been deactivated.');
 
+    resetLimit('login', req);
     const token = createSession(user.id, req.headers['user-agent']);
     setCookie(res, SESSION_COOKIE, token);
     return { user: publicUser(user) };
@@ -35,10 +47,12 @@ export default function register(router) {
   }));
 
   /**
-   * Open registration creates a spectator account. The very first account on a
+   * Open registration creates a player account. The very first account on a
    * fresh install becomes the super admin so the platform is usable at once.
    */
-  router.post('/api/auth/register', ({ body, req, res }) => {
+  router.post('/api/auth/register', (ctx) => {
+    signupLimiter(ctx);
+    const { body, req, res } = ctx;
     const email = String(body.email || '').trim().toLowerCase();
     if (get('SELECT id FROM users WHERE email = ?', [email])) {
       throw conflict('An account with that email already exists.');
@@ -46,7 +60,7 @@ export default function register(router) {
     const isFirst = get('SELECT COUNT(*) AS n FROM users').n === 0;
     let id;
     try {
-      id = createUser({ email, name: body.name, password: body.password, role: isFirst ? 'super_admin' : 'spectator' });
+      id = createUser({ email, name: body.name, password: body.password, role: isFirst ? 'super_admin' : 'player' });
     } catch (err) {
       throw badRequest(err.message);
     }

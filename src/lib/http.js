@@ -148,6 +148,11 @@ export function serveStatic(req, res, urlPath) {
   return true;
 }
 
+export function redirect(res, location, status = 302) {
+  res.writeHead(status, { Location: location, 'Cache-Control': 'no-store' });
+  res.end();
+}
+
 export function sendHtml(res, status, html) {
   res.writeHead(status, {
     'Content-Type': 'text/html; charset=utf-8',

@@ -7,7 +7,7 @@ import { all, get, parseJson } from '../db.js';
 import { notFound } from '../lib/http.js';
 import { computeGroupStandings, computeStandingsWithMovement, tournamentStats } from '../services/leaderboard.js';
 import { previewQualification, storedQualification } from '../services/qualify.js';
-import { listMatches, matchDetail } from './matches.js';
+import { listMatches, matchDetail, participantTeamIds } from './matches.js';
 import { loadSettings } from './tournaments.js';
 
 function publicTournament(slug) {
@@ -37,7 +37,10 @@ export default function register(router) {
     const tournament = publicTournament(ctx.params.slug);
     const settings = loadSettings(tournament.id);
     const tiebreakers = parseJson(settings.tiebreakers, []);
-    const matches = listMatches(tournament.id, { privileged: false });
+    const matches = listMatches(tournament.id, {
+      privileged: false,
+      participantTeams: participantTeamIds(ctx.user, tournament.id),
+    });
 
     return {
       tournament: strip(tournament),
@@ -57,6 +60,7 @@ export default function register(router) {
     return {
       matches: listMatches(tournament.id, {
         privileged: false,
+        participantTeams: participantTeamIds(ctx.user, tournament.id),
         stageId: ctx.query.stage ? Number(ctx.query.stage) : null,
         status: ctx.query.status || null,
         search: ctx.query.search || '',
@@ -70,7 +74,13 @@ export default function register(router) {
     const id = Number(ctx.params.matchId);
     const match = get('SELECT id FROM matches WHERE tournament_id = ? AND (id = ? OR match_no = ?)', [tournament.id, id, id]);
     if (!match) throw notFound('Match not found');
-    return { tournament: strip(tournament), match: matchDetail(match.id, { privileged: false }) };
+    return {
+      tournament: strip(tournament),
+      match: matchDetail(match.id, {
+        privileged: false,
+        participantTeams: participantTeamIds(ctx.user, tournament.id),
+      }),
+    };
   });
 
   router.get('/api/public/t/:slug/leaderboard', (ctx) => {
@@ -140,6 +150,114 @@ export default function register(router) {
       config: preview.config,
       qualified: preview.qualified,
       eliminated: preview.eliminated,
+    };
+  });
+
+  /** Tournament rules, already sanitised at write time. */
+  router.get('/api/public/t/:slug/rules', (ctx) => {
+    const tournament = publicTournament(ctx.params.slug);
+    const settings = loadSettings(tournament.id);
+    return {
+      rules_html: tournament.rules_html || '',
+      entry_requirements: tournament.entry_requirements || '',
+      scoring: parseJson(settings.scoring, {}),
+      tiebreakers: parseJson(settings.tiebreakers, []),
+      qualification: parseJson(settings.qualification, {}),
+      format: {
+        type: tournament.format_type, match_format: tournament.match_format,
+        num_teams: tournament.num_teams, num_groups: tournament.num_groups,
+        teams_per_match: tournament.teams_per_match,
+        min_players: tournament.min_players, max_players: tournament.max_players,
+      },
+    };
+  });
+
+  /**
+   * The stage-by-stage flow spectators follow:
+   * Registration -> Group Stage -> ... -> Grand Final -> Champion.
+   */
+  router.get('/api/public/t/:slug/progression', (ctx) => {
+    const tournament = publicTournament(ctx.params.slug);
+    const settings = loadSettings(tournament.id);
+    const tiebreakers = parseJson(settings.tiebreakers, []);
+    const stages = all('SELECT * FROM stages WHERE tournament_id = ? ORDER BY order_index', [tournament.id]);
+
+    const steps = stages.map((stage) => {
+      const counts = get(
+        `SELECT COUNT(*) AS total,
+                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+                SUM(CASE WHEN status = 'live' THEN 1 ELSE 0 END) AS live,
+                SUM(CASE WHEN status = 'upcoming' THEN 1 ELSE 0 END) AS upcoming
+           FROM matches WHERE stage_id = ?`,
+        [stage.id],
+      );
+      const locked = storedQualification(stage.id);
+      return {
+        id: stage.id,
+        name: stage.name,
+        kind: stage.kind,
+        status: stage.status,
+        matches: counts.total || 0,
+        completed: counts.completed || 0,
+        live: counts.live || 0,
+        upcoming: counts.upcoming || 0,
+        teams: get('SELECT COUNT(DISTINCT team_id) AS n FROM match_participants mp JOIN matches m ON m.id = mp.match_id WHERE m.stage_id = ?', [stage.id]).n,
+        qualified: locked.filter((q) => q.status === 'qualified').map((q) => ({ team_name: q.team_name, tag: q.tag, logo_url: q.logo_url, rank: q.rank })),
+        eliminated: locked.filter((q) => q.status === 'eliminated').length,
+        locked: locked.length > 0,
+      };
+    });
+
+    // The champion is the leader of the final stage once it is complete.
+    const finalStage = stages[stages.length - 1];
+    let champion = null;
+    if (finalStage && finalStage.status === 'completed') {
+      const table = computeStandingsWithMovement({ tournamentId: tournament.id, stageId: finalStage.id, tiebreakers });
+      champion = table.find((s) => s.matches_played > 0) || null;
+    }
+
+    return {
+      registration: {
+        open: Boolean(tournament.registration_open),
+        deadline: tournament.registration_deadline,
+        registered: get("SELECT COUNT(*) AS n FROM tournament_registrations WHERE tournament_id = ? AND status = 'approved'", [tournament.id]).n,
+        slots: tournament.slots || tournament.num_teams,
+      },
+      steps,
+      champion,
+      status: tournament.status,
+    };
+  });
+
+  /** Live mode: what is happening right now. */
+  router.get('/api/public/t/:slug/live', (ctx) => {
+    const tournament = publicTournament(ctx.params.slug);
+    const settings = loadSettings(tournament.id);
+    const tiebreakers = parseJson(settings.tiebreakers, []);
+    const participantTeams = participantTeamIds(ctx.user, tournament.id);
+    const matches = listMatches(tournament.id, { privileged: false, participantTeams });
+
+    const live = matches.filter((m) => m.status === 'live');
+    const latest = matches.filter((m) => m.status === 'completed').slice(-1)[0] || null;
+
+    return {
+      tournament: strip(tournament),
+      live,
+      next: matches.find((m) => m.status === 'upcoming') || null,
+      latest_result: latest
+        ? {
+          ...latest,
+          results: all(
+            `SELECT r.*, t.name AS team_name, t.tag, t.logo_url FROM match_results r
+               JOIN teams t ON t.id = r.team_id WHERE r.match_id = ?
+              ORDER BY COALESCE(r.placement, 999)`,
+            [latest.id],
+          ),
+        }
+        : null,
+      standings: computeStandingsWithMovement({ tournamentId: tournament.id, tiebreakers }).slice(0, 20),
+      stats: tournamentStats(tournament.id, tiebreakers),
+      updated_at: new Date().toISOString(),
     };
   });
 

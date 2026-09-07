@@ -24,6 +24,9 @@ const { DEFAULT_SETTINGS, SYSTEM_TEMPLATES } = await import('./config.js');
 const { generateStageFixtures } = await import('./services/scheduler.js');
 const { computeResult } = await import('./services/scoring.js');
 const { makeRng } = await import('./services/fixtures.js');
+const { createSquad } = await import('./services/squads.js');
+const { ensureSystemPresets } = await import('./routes/moderation.js');
+const { sanitizeHtml } = await import('./lib/sanitize.js');
 
 const rng = makeRng(20260904);
 const pick = (list) => list[Math.floor(rng() * list.length)];
@@ -207,6 +210,164 @@ run(
   [tournamentId],
 );
 
+// =========================================================== platform tier ==
+ensureSystemPresets();
+
+// Rules and registration settings for the demo tournament.
+run(
+  `UPDATE tournaments
+      SET rules_html = ?, entry_requirements = ?, organizer_name = ?, region = ?,
+          slots = 16, min_players = 4, max_players = 5, check_in_enabled = 1,
+          default_reveal_minutes = 15
+    WHERE id = ?`,
+  [
+    sanitizeHtml(`
+      <h2>Match rules</h2>
+      <p>All matches are <strong>Squad TPP</strong> on the official BGMI client. Emulators are not permitted.</p>
+      <ul>
+        <li>Teams must join the custom room 10 minutes before the scheduled start.</li>
+        <li>A team that is not in the lobby at start time forfeits that match.</li>
+        <li>Teaming, hacking or abusive conduct results in immediate disqualification.</li>
+        <li>Match results published by the organizer are final unless disputed within 30 minutes.</li>
+      </ul>
+      <h2>Scoring</h2>
+      <p>Official BGMI points: 10 for a win, then 6/5/4/3/2/1/1, plus <strong>1 point per kill</strong>.</p>
+      <h2>Qualification</h2>
+      <p>The top 8 teams after the league stage advance to the Grand Final.</p>`),
+    'Level 40+ BGMI account. Players must be 16 or older. India region only.',
+    'Aarav Menon',
+    'India',
+    tournamentId,
+  ],
+);
+
+// ------------------------------------------------------------ player accounts
+const PLAYER_ACCOUNTS = [
+  ['arjun@example.com', 'Arjun Sharma', 'ARJUNxOP', 'Maharashtra'],
+  ['kabir@example.com', 'Kabir Rao', 'KBRsniper', 'Karnataka'],
+  ['ishan@example.com', 'Ishan Verma', 'IZNfrags', 'Delhi'],
+  ['rohan@example.com', 'Rohan Das', 'RO7clutch', 'West Bengal'],
+  ['neha@example.com', 'Neha Kapoor', 'NEHAace', 'Punjab'],
+  ['zoya@example.com', 'Zoya Khan', 'ZOYAflick', 'Telangana'],
+  ['dev@example.com', 'Dev Patel', 'DEVrush', 'Gujarat'],
+  ['aman@example.com', 'Aman Singh', 'AMANwolf', 'Rajasthan'],
+];
+
+const playerIds = [];
+for (const [email, name, ign, region] of PLAYER_ACCOUNTS) {
+  let id = get('SELECT id FROM users WHERE email = ?', [email])?.id;
+  if (!id) id = createUser({ email, name, password: 'player1234', role: 'player' });
+  run(
+    `INSERT INTO player_profiles (user_id, full_name, ign, in_game_id, phone, game, country, region, is_complete)
+     VALUES (?, ?, ?, ?, ?, 'BGMI', 'India', ?, 1)
+     ON CONFLICT(user_id) DO UPDATE SET ign = excluded.ign, is_complete = 1`,
+    [id, name, ign, `5${Math.floor(rng() * 9e8 + 1e8)}`, `9${Math.floor(rng() * 9e8 + 1e8)}`, region],
+  );
+  run('UPDATE users SET profile_complete = 1 WHERE id = ?', [id]);
+  playerIds.push(id);
+}
+console.log(`Player accounts ready (${playerIds.length}).`);
+
+// ------------------------------------------------------------------- squads --
+const SQUADS = [
+  ['Alpha Wolves', 'AW', [0, 1, 2, 3]],
+  ['Neon Riders', 'NR', [4, 5, 6, 7]],
+];
+const squadIds = [];
+for (const [name, tag, memberIndexes] of SQUADS) {
+  const existing = get('SELECT id FROM squads WHERE name = ?', [name]);
+  let squad;
+  if (existing) {
+    squad = existing;
+  } else {
+    squad = createSquad({
+      name, tag, game: 'BGMI', region: 'India', ownerId: playerIds[memberIndexes[0]],
+      bio: `${name} compete in Indian BGMI circuits.`,
+    }, { id: playerIds[memberIndexes[0]], name });
+  }
+  for (const index of memberIndexes.slice(1)) {
+    run(
+      `INSERT OR IGNORE INTO squad_members (squad_id, user_id, role, status)
+       VALUES (?, ?, 'player', 'active')`,
+      [squad.id, playerIds[index]],
+    );
+  }
+  squadIds.push(squad.id);
+}
+console.log(`Squads ready (${squadIds.length}).`);
+
+// Link the demo tournament's first two teams to those squads, so their team
+// pages show real history rather than sitting empty.
+const demoTeams = all('SELECT id FROM teams WHERE tournament_id = ? ORDER BY seed LIMIT 2', [tournamentId]);
+demoTeams.forEach((team, i) => {
+  if (squadIds[i]) run('UPDATE teams SET squad_id = ? WHERE id = ?', [squadIds[i], team.id]);
+});
+
+// -------------------------------------------- a second, open-registration cup
+const OPEN_SLUG = 'bgmi-open-qualifier-2026';
+if (!get('SELECT id FROM tournaments WHERE slug = ?', [OPEN_SLUG])) {
+  const openId = tx(() => {
+    const id = insert(
+      `INSERT INTO tournaments
+         (slug, name, game, format_type, match_format, description, num_teams, num_groups,
+          num_rounds, matches_per_round, teams_per_match, start_date, end_date, prize_pool,
+          status, is_public, owner_id, registration_open, approval_mode, slots,
+          min_players, max_players, check_in_enabled, organizer_name, region, entry_requirements)
+       VALUES (?, ?, 'BGMI', 'battle_royale', 'Squad (TPP)', ?, 64, 4, 2, 4, 16, ?, ?, ?,
+               'draft', 1, ?, 1, 'manual', 64, 4, 5, 1, ?, 'India', ?)`,
+      [
+        OPEN_SLUG, 'BGMI Open Qualifier 2026',
+        'Open qualifier for the Pro Series. Anyone can register — top 16 teams advance to the main event.',
+        '2026-10-05', '2026-10-07', 'Rs 5,00,000',
+        userIds.tournament_admin,
+        'Priya Nair',
+        'Open to all. Level 30+ account. Squads of 4 with one optional substitute.',
+      ],
+    );
+    const settings = DEFAULT_SETTINGS();
+    settings.qualification = { mode: 'top_overall', count: 16, perGroup: 4, customTeamIds: [] };
+    run(
+      `INSERT INTO tournament_settings
+         (tournament_id, scoring, tiebreakers, qualification, fixture_options, schedule_options, notification_prefs)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id, toJson(settings.scoring), toJson(settings.tiebreakers), toJson(settings.qualification),
+        toJson(settings.fixture_options), toJson(settings.schedule_options), toJson(settings.notification_prefs),
+      ],
+    );
+    insert(
+      `INSERT INTO stages (tournament_id, name, kind, order_index, status, num_groups, num_rounds, matches_per_round, teams_per_match)
+       VALUES (?, 'Open Qualifier', 'group_stage', 0, 'pending', 4, 2, 4, 16)`,
+      [id],
+    );
+    return id;
+  });
+
+  // One squad already applied, so the approval queue is not empty on a fresh install.
+  const roster = all(
+    `SELECT u.id AS user_id, u.name, p.ign, p.in_game_id
+       FROM squad_members sm JOIN users u ON u.id = sm.user_id
+       LEFT JOIN player_profiles p ON p.user_id = u.id
+      WHERE sm.squad_id = ? AND sm.status = 'active'`,
+    [squadIds[1]],
+  ).map((m) => ({ ...m, role: 'player' }));
+
+  insert(
+    `INSERT INTO tournament_registrations
+       (tournament_id, squad_id, submitted_by, team_name, contact_name, contact_email, roster, status)
+     VALUES (?, ?, ?, 'Neon Riders', 'Neha Kapoor', 'neha@example.com', ?, 'pending')`,
+    [openId, squadIds[1], playerIds[4], toJson(roster)],
+  );
+  console.log(`Created open-registration tournament #${openId} with 1 pending entry.`);
+}
+
 console.log('\nSeed complete. Sign in with:');
 for (const a of ACCOUNTS) console.log(`  ${a.role.padEnd(18)} ${a.email}  /  ${a.password}`);
-console.log(`\nPublic page: /t/${SLUG}\n`);
+console.log(`  ${'player'.padEnd(18)} arjun@example.com  /  player1234   (captain of Alpha Wolves)`);
+console.log(`  ${'player'.padEnd(18)} neha@example.com   /  player1234   (captain of Neon Riders)`);
+console.log(`\nPublic pages:`);
+console.log(`  /                                  platform home`);
+console.log(`  /tournaments                       discovery`);
+console.log(`  /tournament/${SLUG}`);
+console.log(`  /tournament/${OPEN_SLUG}/register`);
+console.log(`  /me                                player dashboard\n`);

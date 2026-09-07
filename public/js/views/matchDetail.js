@@ -14,8 +14,11 @@ export default {
   title: (data) => data?.match?.label || 'Match',
 
   async load(ctx) {
-    const res = await api.get(`/api/matches/${ctx.params.matchId}/results`);
-    return { ...res, tournamentId: Number(ctx.params.id) };
+    const [res, playerStats] = await Promise.all([
+      api.get(`/api/matches/${ctx.params.matchId}/results`),
+      api.get(`/api/matches/${ctx.params.matchId}/player-stats`).catch(() => ({ teams: [] })),
+    ]);
+    return { ...res, playerStats, tournamentId: Number(ctx.params.id) };
   },
 
   render(data) {
@@ -48,6 +51,7 @@ export default {
         <div class="grid grid-2" style="grid-template-columns:minmax(0,1fr) minmax(0,320px)">
           <div class="col" style="gap:16px">
             ${raw(resultCard(data, canScore))}
+            ${raw(playerStatsCard(data, canScore))}
           </div>
           <div class="col" style="gap:16px">
             ${raw(detailsCard(match, canEdit))}
@@ -129,6 +133,26 @@ export default {
           toast('Results cleared.', { type: 'success' });
           ctx.navigate(`/admin/t/${data.tournamentId}/matches/${match.id}`, { replace: true });
         } catch (err) { toastError(err); }
+      },
+
+      'toggle-pstats': (el) => {
+        const panel = $('#pstats-body', root);
+        if (!panel) return;
+        panel.hidden = !panel.hidden;
+        el.textContent = panel.hidden ? 'Record per-player kills' : 'Hide';
+      },
+
+      async 'save-pstats'(el) {
+        const entries = $('[data-pstat-row]', root).map((row) => ({
+          player_id: Number(row.dataset.player),
+          kills: Number(row.querySelector('[data-pfield=kills]').value) || 0,
+          damage: Number(row.querySelector('[data-pfield=damage]').value) || 0,
+        }));
+        await withBusy(el, async () => {
+          const res = await api.put(`/api/matches/${match.id}/player-stats`, { entries });
+          toast(`Saved stats for ${res.written} player(s). Kill and MVP boards updated.`, { type: 'success' });
+          ctx.navigate(`/admin/t/${data.tournamentId}/matches/${match.id}`, { replace: true });
+        });
       },
 
       async 'save-details'(el) {
@@ -323,6 +347,63 @@ function lineupCard(match) {
               ${teamCell(p, { size: 'sm' })}
             </div>`).join('')}
         </div>
+      </div>
+    </div>`;
+}
+
+/**
+ * Optional per-player kills. Team results stand on their own; this is what
+ * turns "team kills" into real individual numbers for the kill and MVP
+ * leaderboards, so it is collapsed until an organizer wants it.
+ */
+function playerStatsCard({ playerStats, match }, canScore) {
+  const teams = playerStats?.teams || [];
+  if (!teams.length) return '';
+  const recorded = teams.some((t) => t.players.some((p) => p.kills > 0));
+
+  return `
+    <div class="card">
+      <div class="card-head">
+        <div>
+          <h2>Per-player stats ${recorded ? '<span class="badge badge-completed">Recorded</span>' : '<span class="badge badge-neutral">Optional</span>'}</h2>
+        </div>
+        ${canScore ? `<button class="btn btn-sm" data-act="toggle-pstats">${recorded ? 'Hide' : 'Record per-player kills'}</button>` : ''}
+      </div>
+      <div class="card-body" id="pstats-body" ${recorded ? '' : 'hidden'}>
+        <div class="info-box mb-2">
+          ${icon('info', 15)}
+          <div>Optional. Team points are unaffected — this only powers the individual kill board and MVP.</div>
+        </div>
+        <div class="grid grid-2" style="gap:16px">
+          ${teams.map((team) => `
+            <div>
+              <div class="row mb-1" style="gap:8px">
+                ${teamCell(team, { size: 'sm' })}
+              </div>
+              <div class="pstat-row result-head mb-1">
+                <span>Player</span><span class="right">Kills</span><span class="right">Damage</span>
+              </div>
+              <div class="col" style="gap:6px">
+                ${team.players.map((p) => `
+                  <div class="pstat-row" data-pstat-row data-player="${p.id}">
+                    <span class="small truncate">
+                      ${p.is_captain ? `<span style="color:var(--gold)">${icon('crown', 11)}</span> ` : ''}${esc(p.name)}
+                      ${p.is_substitute ? '<span class="role-pill substitute">sub</span>' : ''}
+                    </span>
+                    <input class="input input-sm num right" data-pfield="kills" type="number" min="0"
+                           value="${p.kills}" ${canScore ? '' : 'disabled'}>
+                    <input class="input input-sm num right" data-pfield="damage" type="number" min="0"
+                           value="${p.damage}" ${canScore ? '' : 'disabled'}>
+                  </div>`).join('')}
+                ${team.players.length ? '' : '<div class="small dim">No roster recorded for this team.</div>'}
+              </div>
+            </div>`).join('')}
+        </div>
+        ${canScore ? `
+          <div class="row-between mt-3">
+            <span class="small dim">Leave everything at zero to skip.</span>
+            <button class="btn btn-primary" data-act="save-pstats" data-busy-label="Saving">Save player stats</button>
+          </div>` : ''}
       </div>
     </div>`;
 }

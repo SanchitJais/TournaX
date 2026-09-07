@@ -21,17 +21,65 @@ export function normaliseStamp(value) {
   return String(value).replace('T', ' ').slice(0, 19);
 }
 
-/** Room ID and password stay hidden until the reveal time, except for staff. */
-export function visibleCredentials(match, { privileged }) {
-  if (privileged) return { room_id: match.room_id, room_password: match.room_password, revealed: true };
-  const revealAt = match.credentials_reveal_at;
-  const revealed = !revealAt || new Date(revealAt.replace(' ', 'T')) <= new Date();
-  return revealed
-    ? { room_id: match.room_id, room_password: match.room_password, revealed: true }
-    : { room_id: null, room_password: null, revealed: false, reveal_at: revealAt };
+/**
+ * Room ID and password visibility.
+ *
+ * Staff always see them. Everyone else is subject to the match's reveal
+ * policy -- immediately, a set number of minutes before the match, or manual
+ * (an explicit reveal time). `participant` gates the final release: once due,
+ * the details go to the teams playing the match, not to the open web.
+ */
+export function visibleCredentials(match, { privileged = false, participant = false } = {}) {
+  const hidden = { room_id: null, room_password: null, revealed: false };
+  if (privileged) {
+    return {
+      room_id: match.room_id, room_password: match.room_password,
+      revealed: true, policy: match.reveal_policy || 'manual',
+    };
+  }
+  if (!match.room_id && !match.room_password) return { ...hidden, reason: 'not_set' };
+
+  const policy = match.reveal_policy || 'manual';
+  const now = new Date();
+  let dueAt = null;
+
+  if (policy === 'immediate') {
+    dueAt = now;
+  } else if (match.credentials_reveal_at) {
+    dueAt = new Date(String(match.credentials_reveal_at).replace(' ', 'T'));
+  } else if (policy === 'minutes' && match.scheduled_at) {
+    const start = new Date(String(match.scheduled_at).replace(' ', 'T'));
+    dueAt = new Date(start.getTime() - (match.reveal_minutes_before ?? 15) * 60000);
+  }
+
+  if (!dueAt || dueAt > now) {
+    return {
+      ...hidden, policy,
+      reveal_at: dueAt ? formatLocal(dueAt) : null,
+      reason: dueAt ? 'scheduled' : 'manual',
+    };
+  }
+  if (!participant) return { ...hidden, policy, restricted: true, reason: 'participants_only' };
+
+  return { room_id: match.room_id, room_password: match.room_password, revealed: true, policy };
 }
 
-export function matchDetail(id, { privileged = false } = {}) {
+const pad2 = (n) => String(n).padStart(2, '0');
+const formatLocal = (d) =>
+  `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+
+/** Team ids the signed-in user actually plays for in this tournament. */
+export function participantTeamIds(user, tournamentId) {
+  if (!user) return new Set();
+  return new Set(all(
+    `SELECT t.id FROM teams t
+       JOIN squad_members sm ON sm.squad_id = t.squad_id
+      WHERE t.tournament_id = ? AND sm.user_id = ? AND sm.status = 'active'`,
+    [tournamentId, user.id],
+  ).map((r) => r.id));
+}
+
+export function matchDetail(id, { privileged = false, participantTeams = null } = {}) {
   const match = get(
     `SELECT m.*, s.name AS stage_name, s.kind AS stage_kind, r.name AS round_name, g.name AS group_name
        FROM matches m
@@ -56,9 +104,10 @@ export function matchDetail(id, { privileged = false } = {}) {
     [id],
   );
 
-  const { room_id, room_password, ...reveal } = visibleCredentials(match, { privileged });
+  const participant = Boolean(participantTeams && participants.some((p) => participantTeams.has(p.team_id)));
+  const { room_id, room_password, ...reveal } = visibleCredentials(match, { privileged, participant });
   return {
-    ...match, room_id, room_password, credentials: reveal,
+    ...match, room_id, room_password, credentials: { ...reveal, participant },
     participants,
     results,
   };
@@ -153,6 +202,7 @@ export default function register(router) {
     return {
       matches: listMatches(tournamentId, {
         privileged,
+        participantTeams: participantTeamIds(ctx.user, tournamentId),
         stageId: ctx.query.stage ? Number(ctx.query.stage) : null,
         status: ctx.query.status || null,
         search: ctx.query.search || '',
@@ -165,7 +215,7 @@ export default function register(router) {
     const base = get('SELECT tournament_id FROM matches WHERE id = ?', [id]);
     if (!base) throw notFound('Match not found');
     const privileged = can(ctx.user, 'matches:write', base.tournament_id) || can(ctx.user, 'results:write', base.tournament_id);
-    return { match: matchDetail(id, { privileged }) };
+    return { match: matchDetail(id, { privileged, participantTeams: participantTeamIds(ctx.user, base.tournament_id) }) };
   });
 
   router.post('/api/tournaments/:id/matches', (ctx) => {
@@ -217,7 +267,8 @@ export default function register(router) {
 
     const allowed = statusOnly
       ? ['status']
-      : ['label', 'map', 'scheduled_at', 'room_id', 'room_password', 'credentials_reveal_at', 'status', 'notes', 'group_id', 'round_id'];
+      : ['label', 'map', 'scheduled_at', 'room_id', 'room_password', 'credentials_reveal_at',
+        'reveal_policy', 'reveal_minutes_before', 'status', 'notes', 'group_id', 'round_id'];
 
     if (ctx.body.status && !MATCH_STATUSES.includes(ctx.body.status)) {
       throw badRequest(`Status must be one of: ${MATCH_STATUSES.join(', ')}.`);
@@ -271,7 +322,9 @@ export default function register(router) {
         const changed = updateRow('matches', Number(entry.match_id), {
           room_id: entry.room_id, room_password: entry.room_password,
           credentials_reveal_at: normaliseStamp(entry.credentials_reveal_at),
-        }, ['room_id', 'room_password', 'credentials_reveal_at']);
+          reveal_policy: entry.reveal_policy,
+          reveal_minutes_before: entry.reveal_minutes_before,
+        }, ['room_id', 'room_password', 'credentials_reveal_at', 'reveal_policy', 'reveal_minutes_before']);
         if (changed) updated++;
       }
     });
@@ -386,7 +439,9 @@ export default function register(router) {
 }
 
 // --------------------------------------------------------------------- utils --
-export function listMatches(tournamentId, { privileged = false, stageId = null, status = null, search = '' } = {}) {
+export function listMatches(tournamentId, {
+  privileged = false, stageId = null, status = null, search = '', participantTeams = null,
+} = {}) {
   const where = ['m.tournament_id = ?'];
   const params = [tournamentId];
   if (stageId) { where.push('m.stage_id = ?'); params.push(stageId); }
@@ -425,10 +480,12 @@ export function listMatches(tournamentId, { privileged = false, stageId = null, 
   for (const r of results) resultsByMatch.get(r.match_id)?.push(r);
 
   return matches.map((m) => {
-    const { room_id, room_password, ...reveal } = visibleCredentials(m, { privileged });
+    const lineup = byMatch.get(m.id) || [];
+    const participant = Boolean(participantTeams && lineup.some((p) => participantTeams.has(p.team_id)));
+    const { room_id, room_password, ...reveal } = visibleCredentials(m, { privileged, participant });
     return {
-      ...m, room_id, room_password, credentials: reveal,
-      teams: byMatch.get(m.id) || [],
+      ...m, room_id, room_password, credentials: { ...reveal, participant },
+      teams: lineup,
       result_count: (resultsByMatch.get(m.id) || []).length,
       winner: (resultsByMatch.get(m.id) || []).find((r) => r.placement === 1) || null,
     };

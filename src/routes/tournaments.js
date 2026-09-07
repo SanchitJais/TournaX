@@ -2,10 +2,11 @@
 import { all, get, insert, parseJson, run, toJson, tx, updateRow } from '../db.js';
 import { can, requireAbility, requireUser } from '../auth.js';
 import {
-  DEFAULT_SETTINGS, FORMAT_TYPES, MAPS, NOTIFICATION_EVENTS, STAGE_KINDS, STAGE_LABELS,
-  TIEBREAKER_KEYS,
+  CAN_CREATE_TOURNAMENTS, DEFAULT_SETTINGS, FORMAT_TYPES, GAMES, MAPS, NOTIFICATION_EVENTS,
+  REGIONS, REVEAL_POLICIES, REVEAL_MINUTE_CHOICES, STAGE_KINDS, STAGE_LABELS, TIEBREAKER_KEYS,
 } from '../config.js';
 import { badRequest, conflict, notFound, saveDataUrl } from '../lib/http.js';
+import { sanitizeHtml } from '../lib/sanitize.js';
 import { recordAudit } from '../services/audit.js';
 import { currentStage, generateNextStage, nextStageKind } from '../services/progression.js';
 import { tournamentStats } from '../services/leaderboard.js';
@@ -14,7 +15,14 @@ const TOURNAMENT_FIELDS = [
   'name', 'game', 'format_type', 'match_format', 'description', 'banner_url', 'logo_url',
   'num_teams', 'num_groups', 'num_rounds', 'matches_per_round', 'teams_per_match',
   'start_date', 'end_date', 'timezone', 'prize_pool', 'status', 'is_public',
+  // Platform tier: registration, check-in, rules and presentation.
+  'registration_open', 'registration_opens_at', 'registration_deadline', 'slots',
+  'approval_mode', 'check_in_enabled', 'check_in_minutes_before', 'check_in_close_minutes',
+  'rules_html', 'region', 'organizer_name', 'entry_requirements',
+  'min_players', 'max_players', 'default_reveal_minutes', 'allow_multi_team',
 ];
+
+const BOOLEAN_FIELDS = ['is_public', 'registration_open', 'check_in_enabled', 'allow_multi_team'];
 
 export function slugify(name, suffix = '') {
   const base = String(name || 'tournament')
@@ -81,6 +89,11 @@ export default function register(router) {
     tiebreakers: TIEBREAKER_KEYS,
     notificationEvents: NOTIFICATION_EVENTS,
     maps: MAPS,
+    games: GAMES,
+    regions: REGIONS,
+    revealPolicies: REVEAL_POLICIES,
+    revealMinutes: REVEAL_MINUTE_CHOICES,
+    canCreate: CAN_CREATE_TOURNAMENTS,
     defaults: DEFAULT_SETTINGS(),
   }));
 
@@ -111,8 +124,8 @@ export default function register(router) {
   /** Create -- optionally seeded from a template. */
   router.post('/api/tournaments', (ctx) => {
     const user = requireUser(ctx);
-    if (!can(ctx.user, 'tournament:write') && ctx.user.role !== 'tournament_admin' && ctx.user.role !== 'super_admin') {
-      throw badRequest('Your role cannot create tournaments.');
+    if (!CAN_CREATE_TOURNAMENTS.includes(user.role)) {
+      throw badRequest('Your role cannot create tournaments. Ask an admin for organizer access.');
     }
     const body = { ...ctx.body };
 
@@ -195,7 +208,12 @@ export default function register(router) {
     const fields = { ...ctx.body };
     if (fields.banner_url) fields.banner_url = saveDataUrl(fields.banner_url, 'banner');
     if (fields.logo_url) fields.logo_url = saveDataUrl(fields.logo_url, 'logo');
-    if (fields.is_public !== undefined) fields.is_public = fields.is_public ? 1 : 0;
+    for (const key of BOOLEAN_FIELDS) {
+      if (fields[key] !== undefined) fields[key] = fields[key] ? 1 : 0;
+    }
+    // Rules are rich text shown to the public, so they are sanitised here --
+    // never trusted from the client, whichever editor produced them.
+    if (fields.rules_html !== undefined) fields.rules_html = sanitizeHtml(fields.rules_html);
     if (fields.name && fields.name !== before.name && !ctx.body.keep_slug) {
       fields.slug = uniqueSlug(fields.name);
     }

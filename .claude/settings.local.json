@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p tools)",
+      "Bash(printf '%s\\\\n' \"import {all} from '../src/db.js';\" \"const t=all\\(\\\\\"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name\\\\\"\\);\" \"for \\(const r of t\\) console.log\\(r.name.padEnd\\(24\\), all\\('SELECT COUNT\\(*\\) n FROM '+r.name\\)[0].n\\);\")",
+      "Bash(node tools/counts.mjs)",
+      "Bash(node --test test/sanitize.test.js)",
+      "Bash(node --test)",
+      "Bash(sed -i 's|^   \\\\* Open registration creates a spectator account. The very first account on a$|   * Open registration creates a player account. The very first account on a|' src/routes/auth.js)",
+      "Bash(node --test test/platform.test.js)",
+      "Bash(node \"C:/Users/sanch/AppData/Local/Temp/claude/d--Projects-Tournament-Project/4b670fa4-3c54-4426-aaab-df2f62db0ea6/scratchpad/patch-settings.mjs\")",
+      "Bash(node --check public/js/views/settings.js)",
+      "Bash(node \"C:/Users/sanch/AppData/Local/Temp/claude/d--Projects-Tournament-Project/4b670fa4-3c54-4426-aaab-df2f62db0ea6/scratchpad/patch-matchdetail.mjs\")",
+      "Bash(node --check public/js/views/matchDetail.js)",
+      "Bash(node \"C:/Users/sanch/AppData/Local/Temp/claude/d--Projects-Tournament-Project/4b670fa4-3c54-4426-aaab-df2f62db0ea6/scratchpad/patch-seed.mjs\")",
+      "Bash(node --check src/seed.js)",
+      "Bash(node src/seed.js --reset)"
+    ]
+  }
+}

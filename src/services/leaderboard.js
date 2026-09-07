@@ -8,6 +8,7 @@
 import { all, parseJson } from '../db.js';
 import { DEFAULT_TIEBREAKERS } from '../config.js';
 import { round2 } from './scoring.js';
+import { penaltyTotals } from './penalties.js';
 
 /** Higher is better unless listed here. */
 const ASCENDING = new Set(['best_placement', 'fewest_matches', 'avg_placement', 'team_name']);
@@ -77,13 +78,19 @@ export function computeStandings(opts) {
   }
 
   const teams = all(
-    `SELECT t.id, t.name, t.tag, t.logo_url, t.status, t.seed, t.group_id, g.name AS group_name
+    `SELECT t.id, t.name, t.tag, t.logo_url, t.status, t.seed, t.group_id, t.squad_id,
+            t.disqualified, t.checked_in_at, g.name AS group_name
        FROM teams t
        LEFT JOIN groups g ON g.id = t.group_id
       WHERE ${where.join(' AND ')}
       ORDER BY t.name`,
     params,
   );
+
+  // Standalone sanctions (not tied to a single match) come off the total here
+  // rather than being written into any stored figure, so revoking one restores
+  // the table immediately.
+  const sanctions = penaltyTotals(tournamentId);
 
   // Only completed matches count towards standings.
   const resultWhere = ['m.tournament_id = ?', "m.status = 'completed'"];
@@ -111,6 +118,10 @@ export function computeStandings(opts) {
       seed: team.seed,
       group_id: team.group_id,
       group_name: team.group_name,
+      squad_id: team.squad_id,
+      disqualified: team.disqualified ? 1 : 0,
+      checked_in: team.checked_in_at ? 1 : 0,
+      sanction_points: sanctions.get(team.id) || 0,
       matches_played: 0,
       wins: 0,
       placement_points: 0,
@@ -151,14 +162,16 @@ export function computeStandings(opts) {
 
   const standings = [...byTeam.values()].map((s) => {
     const played = s.matches_played || 0;
+    // Match penalties are already inside total_points; sanctions are not.
+    const total = s.total_points - s.sanction_points;
     return {
       ...s,
       placement_points: round2(s.placement_points),
       kill_points: round2(s.kill_points),
       bonus_points: round2(s.bonus_points),
-      penalty_points: round2(s.penalty_points),
-      total_points: round2(s.total_points),
-      avg_points: played ? round2(s.total_points / played) : 0,
+      penalty_points: round2(s.penalty_points + s.sanction_points),
+      total_points: round2(total),
+      avg_points: played ? round2(total / played) : 0,
       avg_kills: played ? round2(s.total_kills / played) : 0,
       avg_placement: s.placements.length
         ? round2(s.placements.reduce((a, b) => a + b, 0) / s.placements.length)

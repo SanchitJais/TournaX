@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { migrate } from './migrations.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT = path.resolve(__dirname, '..');
@@ -19,6 +20,8 @@ db.exec('PRAGMA journal_mode = WAL');
 db.exec('PRAGMA foreign_keys = ON');
 db.exec('PRAGMA busy_timeout = 5000');
 db.exec(fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8'));
+// Additive upgrades for databases created by an earlier version.
+migrate(db);
 
 /** Rows come back as null-prototype objects; normalise to plain objects. */
 const plain = (row) => (row ? { ...row } : row);

@@ -13,24 +13,37 @@ import { purgeExpiredSessions, userFromRequest } from './src/auth.js';
 import { HttpError, readBody, sendHtml, sendJson, serveStatic } from './src/lib/http.js';
 
 import registerAuth from './src/routes/auth.js';
+import registerAccount from './src/routes/account.js';
+import registerSquads from './src/routes/squads.js';
 import registerTournaments from './src/routes/tournaments.js';
+import registerRegistrations from './src/routes/registrations.js';
 import registerTeams from './src/routes/teams.js';
 import registerMatches from './src/routes/matches.js';
+import registerModeration from './src/routes/moderation.js';
 import registerInsights from './src/routes/insights.js';
+import registerDiscovery from './src/routes/discovery.js';
 import registerExports from './src/routes/exports.js';
 import registerPublic from './src/routes/public.js';
+import { ensureSystemPresets } from './src/routes/moderation.js';
 
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
 
 const router = createRouter();
 registerAuth(router);
+registerAccount(router);
+registerSquads(router);
 registerTournaments(router);
+registerRegistrations(router);
 registerTeams(router);
 registerMatches(router);
+registerModeration(router);
 registerInsights(router);
+registerDiscovery(router);
 registerExports(router);
 registerPublic(router);
+
+ensureSystemPresets();
 
 const INDEX = path.join(ROOT, 'public', 'index.html');
 
@@ -96,4 +109,7 @@ server.listen(PORT, HOST, () => {
   console.log(`  Public   http://${shown}:${PORT}/\n`);
 });
 
+process.on('uncaughtException', (err) => console.error('[uncaughtException]', err));
+process.on('unhandledRejection', (reason) => console.error('[unhandledRejection]', reason));
 process.on('SIGINT', () => { console.log('\nShutting down.'); server.close(() => process.exit(0)); });
+

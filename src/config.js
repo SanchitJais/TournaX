@@ -1,27 +1,57 @@
 /** Shared defaults, vocabularies and built-in tournament templates. */
 
-export const ROLES = ['super_admin', 'tournament_admin', 'scorekeeper', 'team_manager', 'spectator'];
+export const ROLES = [
+  'super_admin', 'organizer', 'tournament_admin', 'scorekeeper', 'team_manager', 'player', 'spectator',
+];
 
 export const ROLE_LABELS = {
   super_admin: 'Super Admin',
+  organizer: 'Tournament Organizer',
   tournament_admin: 'Tournament Admin',
   scorekeeper: 'Scorekeeper',
-  team_manager: 'Team Manager',
+  team_manager: 'Team Manager / Captain',
+  player: 'Player',
   spectator: 'Spectator',
 };
 
-/** Coarse capability model. Route guards ask `can(user, 'results:write')`. */
+export const ROLE_DESCRIPTIONS = {
+  super_admin: 'Full access to everything, including user management.',
+  organizer: 'Creates and runs their own tournaments end to end.',
+  tournament_admin: 'Manages teams, fixtures, results and settings for assigned tournaments.',
+  scorekeeper: 'Enters and edits match results, and moves matches between statuses.',
+  team_manager: 'Runs a team: roster, invites and tournament sign-ups.',
+  player: 'Joins a team, registers for tournaments and follows their own matches.',
+  spectator: 'Read-only access to public pages.',
+};
+
+/** Everything a role may be granted. Route guards ask `can(user, 'results:write')`. */
+export const ABILITIES = [
+  'tournament:create', 'tournament:write', 'teams:write', 'fixtures:write', 'matches:write',
+  'matches:status', 'results:write', 'qualification:write', 'stages:write', 'registrations:write',
+  'penalties:write', 'rules:write', 'export', 'audit:read', 'notifications:write', 'templates:write',
+  'squad:create', 'profile:write',
+];
+
+const ORGANISER_ABILITIES = [
+  'tournament:write', 'teams:write', 'fixtures:write', 'matches:write', 'matches:status',
+  'results:write', 'qualification:write', 'stages:write', 'registrations:write',
+  'penalties:write', 'rules:write', 'export', 'audit:read', 'notifications:write',
+  'templates:write', 'squad:create', 'profile:write',
+];
+
+/** Coarse capability model. */
 export const ROLE_ABILITIES = {
   super_admin: ['*'],
-  tournament_admin: [
-    'tournament:write', 'teams:write', 'fixtures:write', 'matches:write',
-    'results:write', 'qualification:write', 'stages:write', 'export', 'audit:read',
-    'notifications:write', 'templates:write',
-  ],
-  scorekeeper: ['results:write', 'matches:status', 'export'],
-  team_manager: ['export'],
+  organizer: ['tournament:create', ...ORGANISER_ABILITIES],
+  tournament_admin: ORGANISER_ABILITIES,
+  scorekeeper: ['results:write', 'matches:status', 'export', 'profile:write'],
+  team_manager: ['export', 'squad:create', 'profile:write'],
+  player: ['squad:create', 'profile:write'],
   spectator: [],
 };
+
+/** Roles allowed to start a brand new tournament. */
+export const CAN_CREATE_TOURNAMENTS = ['super_admin', 'organizer', 'tournament_admin'];
 
 export const MATCH_STATUSES = ['upcoming', 'live', 'completed', 'cancelled'];
 export const STAGE_KINDS = [
@@ -100,14 +130,88 @@ export const DEFAULT_SCHEDULE_OPTIONS = {
 };
 
 export const NOTIFICATION_EVENTS = {
+  'registration.received': 'Registration submitted',
+  'registration.approved': 'Registration confirmed',
+  'registration.rejected': 'Registration rejected',
+  'checkin.open': 'Check-in opened',
+  'tournament.started': 'Tournament starting',
+  'fixtures.generated': 'Fixtures generated',
   'match.upcoming': 'Upcoming match reminder',
   'match.credentials': 'Room ID / password released',
   'match.started': 'Match started',
   'match.completed': 'Match completed',
   'results.published': 'Results published',
   'team.qualified': 'Team qualified',
+  'team.eliminated': 'Team eliminated',
+  'penalty.applied': 'Penalty or disqualification applied',
   'stage.changed': 'Tournament stage changed',
+  'tournament.completed': 'Tournament completed',
+  'squad.invite': 'Team invitation',
 };
+
+/** When room credentials become visible to registered participants. */
+export const REVEAL_POLICIES = {
+  manual: 'Manually reveal',
+  immediate: 'Immediately',
+  minutes: 'A set time before the match',
+};
+export const REVEAL_MINUTE_CHOICES = [5, 10, 15, 30, 60];
+
+export const REGISTRATION_STATUSES = ['pending', 'approved', 'rejected', 'withdrawn'];
+export const SQUAD_MEMBER_ROLES = ['captain', 'player', 'substitute'];
+
+/** Built-in scoring systems, seeded into `scoring_presets`. */
+export const SYSTEM_SCORING_PRESETS = [
+  {
+    name: 'BGMI Standard',
+    game: 'BGMI',
+    description: 'Official BGMI points: 10/6/5/4/3/2/1/1 placement, 1 point per kill.',
+    config: {
+      scoring: {
+        placementPoints: { 1: 10, 2: 6, 3: 5, 4: 4, 5: 3, 6: 2, 7: 1, 8: 1, 9: 0, 10: 0, 11: 0, 12: 0, 13: 0, 14: 0, 15: 0, 16: 0 },
+        killPoints: 1, winBonus: 0, defaultPlacementPoints: 0,
+      },
+      tiebreakers: ['total_points', 'total_kills', 'wins', 'best_placement', 'last_match_points'],
+    },
+  },
+  {
+    name: 'BGMI Classic (15/12/10)',
+    game: 'BGMI',
+    description: 'Older scrim format with a heavier weighting on placement.',
+    config: {
+      scoring: {
+        placementPoints: { 1: 15, 2: 12, 3: 10, 4: 8, 5: 6, 6: 4, 7: 2, 8: 1, 9: 0, 10: 0, 11: 0, 12: 0, 13: 0, 14: 0, 15: 0, 16: 0 },
+        killPoints: 1, winBonus: 0, defaultPlacementPoints: 0,
+      },
+      tiebreakers: ['total_points', 'total_kills', 'best_placement', 'wins'],
+    },
+  },
+  {
+    name: 'Kills Only',
+    game: 'BGMI',
+    description: 'Every kill counts, placement is ignored. Good for TDM and warm-up lobbies.',
+    config: {
+      scoring: { placementPoints: { 1: 0 }, killPoints: 1, winBonus: 0, defaultPlacementPoints: 0 },
+      tiebreakers: ['total_kills', 'total_points', 'wins'],
+    },
+  },
+  {
+    name: 'TDM (Round Wins)',
+    game: 'BGMI',
+    description: 'Team deathmatch: 1 point a win, kills tracked but unscored.',
+    config: {
+      scoring: { placementPoints: { 1: 1, 2: 0 }, killPoints: 0, winBonus: 0, defaultPlacementPoints: 0 },
+      tiebreakers: ['total_points', 'wins', 'total_kills'],
+    },
+  },
+];
+
+export const GAMES = ['BGMI', 'PUBG Mobile', 'Free Fire', 'Valorant', 'CS2', 'Call of Duty Mobile', 'Apex Legends'];
+
+export const REGIONS = [
+  'India', 'South Asia', 'Southeast Asia', 'Middle East', 'Europe',
+  'North America', 'South America', 'Africa', 'Oceania', 'Global',
+];
 
 export const DEFAULT_NOTIFICATION_PREFS = {
   events: Object.fromEntries(Object.keys(NOTIFICATION_EVENTS).map((k) => [k, true])),

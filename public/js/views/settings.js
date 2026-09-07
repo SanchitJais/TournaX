@@ -3,6 +3,8 @@ import { api, download } from '../lib/api.js';
 import { $, $$, delegate, esc, formData, html, raw, readImage } from '../lib/dom.js';
 import { icon } from '../lib/icons.js';
 import { confirmAction, emptyState, modal, toast, toastError, withBusy } from '../lib/ui.js';
+import { bindEditor, editorMarkup } from '../lib/editor.js';
+import { shareBox } from '../lib/share.js';
 import { invalidateTournament } from '../main.js';
 
 export default {
@@ -15,12 +17,17 @@ export default {
       return { templatesOnly: true, templates: templates.templates };
     }
     const id = Number(ctx.params.id);
-    const [bundle, meta, templates] = await Promise.all([
+    const [bundle, meta, templates, presets] = await Promise.all([
       api.get(`/api/tournaments/${id}`),
       api.get('/api/meta'),
       api.get('/api/templates'),
+      api.get('/api/scoring-presets'),
     ]);
-    return { tournamentId: id, ...bundle, meta, templates: templates.templates };
+    return {
+      tournamentId: id, ...bundle, meta,
+      templates: templates.templates,
+      presets: presets.presets,
+    };
   },
 
   render(data, ctx) {
@@ -41,6 +48,8 @@ export default {
     const tab = ctx.query.tab || 'general';
     const tabs = [
       ['general', 'General'],
+      ['registration', 'Registration'],
+      ['rules', 'Rules'],
       ['scoring', 'Scoring'],
       ['schedule', 'Schedule & draw'],
       ['notifications', 'Notifications'],
@@ -65,6 +74,8 @@ export default {
 
         ${raw({
           general: () => generalTab(data),
+          registration: () => registrationTab(data),
+          rules: () => rulesTab(data),
           scoring: () => scoringTab(data),
           schedule: () => scheduleTab(data),
           notifications: () => notificationsTab(data),
@@ -88,6 +99,10 @@ export default {
 
     let logoData = null;
     let bannerData = null;
+    // Only present on the Rules tab; returns the editor's current HTML.
+    const getRulesHtml = root.querySelector('[data-editor="rules-editor"]')
+      ? bindEditor(root, 'rules-editor')
+      : null;
 
     $$('input[type=file][data-image]', root).forEach((input) => {
       input.addEventListener('change', async () => {
@@ -175,6 +190,60 @@ export default {
           await api.patch(`/api/tournaments/${data.tournamentId}/settings`, { notification_prefs: { events, channels } });
           toast('Notification preferences saved.', { type: 'success' });
         });
+      },
+
+      async 'save-registration'(el) {
+        const values = formData($('#registration-form', root));
+        await withBusy(el, async () => {
+          await api.patch(`/api/tournaments/${data.tournamentId}`, { ...values, keep_slug: true });
+          invalidateTournament();
+          toast('Registration settings saved.', { type: 'success' });
+          ctx.navigate(`/admin/t/${data.tournamentId}/settings?tab=registration`, { replace: true });
+        });
+      },
+
+      async 'save-rules'(el) {
+        await withBusy(el, async () => {
+          await api.patch(`/api/tournaments/${data.tournamentId}`, {
+            keep_slug: true,
+            rules_html: getRulesHtml ? getRulesHtml() : '',
+            entry_requirements: $('#entry-requirements', root)?.value || '',
+          });
+          toast('Rules published.', { type: 'success' });
+          ctx.navigate(`/admin/t/${data.tournamentId}/settings?tab=rules`, { replace: true });
+        });
+      },
+
+      async 'apply-preset'(el) {
+        const ok = await confirmAction({
+          title: 'Apply scoring system',
+          message: `Switch this tournament to "${el.dataset.name}"?`,
+          detail: 'Every recorded result is re-scored and the standings recalculate.',
+          confirmLabel: 'Apply',
+          danger: false,
+        });
+        if (!ok) return;
+        try {
+          await api.post(`/api/tournaments/${data.tournamentId}/scoring-preset`, { preset_id: Number(el.dataset.id) });
+          toast('Scoring system applied. Standings recalculated.', { type: 'success' });
+          ctx.navigate(`/admin/t/${data.tournamentId}/settings?tab=scoring`, { replace: true });
+        } catch (err) { toastError(err); }
+      },
+
+      'save-preset': () => savePresetDialog(data, ctx),
+
+      async 'delete-preset'(el) {
+        const ok = await confirmAction({
+          title: 'Delete scoring system',
+          message: `Delete "${el.dataset.name}"?`,
+          confirmLabel: 'Delete',
+        });
+        if (!ok) return;
+        try {
+          await api.delete(`/api/scoring-presets/${el.dataset.id}`);
+          toast('Scoring system deleted.');
+          ctx.navigate(`/admin/t/${data.tournamentId}/settings?tab=scoring`, { replace: true });
+        } catch (err) { toastError(err); }
       },
 
       'save-template': () => saveTemplateDialog(data, ctx),
@@ -270,11 +339,39 @@ function generalTab({ tournament }) {
     </div>`;
 }
 
-function scoringTab({ settings, meta }) {
+function scoringTab({ settings, meta, presets = [] }) {
   const scoring = settings.scoring || {};
   const places = Object.keys(scoring.placementPoints || {}).map(Number).sort((a, b) => a - b);
 
   return `
+    <div class="card mb-3">
+      <div class="card-head">
+        <h2>Scoring systems</h2>
+        <button class="btn btn-sm" data-act="save-preset">${icon('plus', 13)} Save current as a system</button>
+      </div>
+      <div class="card-body">
+        <p class="muted small">Apply a saved system to switch scoring in one step. Nothing is hard-coded.</p>
+        <div class="grid grid-auto mt-2">
+          ${presets.map((p) => `
+            <div class="lobby">
+              <div class="row-between">
+                <h4 style="margin:0">${esc(p.name)}</h4>
+                ${p.is_system ? '<span class="badge badge-info">Built-in</span>'
+                  : `<button class="btn btn-ghost btn-icon" data-act="delete-preset" data-id="${p.id}"
+                        data-name="${esc(p.name)}">${icon('trash', 13)}</button>`}
+              </div>
+              <div class="small muted mt-1">${esc(p.description || '')}</div>
+              <div class="row wrap mt-2 tiny dim" style="gap:10px">
+                <span>${p.config?.scoring?.killPoints ?? 0} pt/kill</span>
+                <span>1st = ${p.config?.scoring?.placementPoints?.['1'] ?? 0}</span>
+              </div>
+              <button class="btn btn-sm btn-block mt-2" data-act="apply-preset" data-id="${p.id}" data-name="${esc(p.name)}">
+                Apply to this tournament</button>
+            </div>`).join('')}
+        </div>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-body">
         <h2 class="mb-1">Points</h2>
@@ -459,6 +556,162 @@ function dangerTab({ tournament, tournamentId }) {
         </div>
       </div>
     </div>`;
+}
+
+function registrationTab({ tournament, tournamentId }) {
+  return `
+    <div class="card mb-3">
+      <div class="card-head">
+        <h2>Registration</h2>
+        <span class="badge badge-${tournament.registration_open ? 'qualified' : 'neutral'}">
+          ${tournament.registration_open ? 'Open' : 'Closed'}</span>
+      </div>
+      <div class="card-body">
+        <form id="registration-form" class="grid grid-2" style="gap:14px">
+          <label class="check" style="grid-column:1/-1">
+            <input type="checkbox" name="registration_open" ${tournament.registration_open ? 'checked' : ''}>
+            Accept registrations
+          </label>
+
+          <div class="field">
+            <label class="label" for="r-opens">Registration opens</label>
+            <input class="input" id="r-opens" name="registration_opens_at" type="datetime-local"
+                   value="${esc((tournament.registration_opens_at || '').replace(' ', 'T').slice(0, 16))}">
+          </div>
+          <div class="field">
+            <label class="label" for="r-deadline">Registration deadline</label>
+            <input class="input" id="r-deadline" name="registration_deadline" type="datetime-local"
+                   value="${esc((tournament.registration_deadline || '').replace(' ', 'T').slice(0, 16))}">
+          </div>
+          <div class="field">
+            <label class="label" for="r-slots">Slots</label>
+            <input class="input" id="r-slots" name="slots" type="number" min="2" max="512"
+                   value="${tournament.slots ?? tournament.num_teams}">
+            <span class="hint">Registration closes automatically when these fill.</span>
+          </div>
+          <div class="field">
+            <label class="label" for="r-approval">Approval</label>
+            <select class="select" id="r-approval" name="approval_mode">
+              <option value="auto" ${tournament.approval_mode === 'auto' ? 'selected' : ''}>Automatic — teams are in straight away</option>
+              <option value="manual" ${tournament.approval_mode === 'manual' ? 'selected' : ''}>Manual — you approve each entry</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="label" for="r-min">Minimum players</label>
+            <input class="input" id="r-min" name="min_players" type="number" min="1" max="12" value="${tournament.min_players}">
+          </div>
+          <div class="field">
+            <label class="label" for="r-max">Maximum players</label>
+            <input class="input" id="r-max" name="max_players" type="number" min="1" max="12" value="${tournament.max_players}">
+          </div>
+          <div class="field" style="grid-column:1/-1">
+            <label class="label" for="r-entry">Entry requirements</label>
+            <textarea class="textarea" id="r-entry" name="entry_requirements" rows="3"
+              placeholder="Level 30+ account, region lock, device restrictions...">${esc(tournament.entry_requirements || '')}</textarea>
+          </div>
+          <label class="check" style="grid-column:1/-1">
+            <input type="checkbox" name="allow_multi_team" ${tournament.allow_multi_team ? 'checked' : ''}>
+            Allow a player to appear in more than one team in this tournament
+          </label>
+        </form>
+
+        <div class="divider"></div>
+        <h3 class="mb-2">Check-in</h3>
+        <form id="registration-form-checkin" class="grid grid-3" style="gap:14px">
+          <label class="check" style="grid-column:1/-1">
+            <input type="checkbox" name="check_in_enabled" form="registration-form" ${tournament.check_in_enabled ? 'checked' : ''}>
+            Require teams to check in before the first match
+          </label>
+          <div class="field">
+            <label class="label" for="c-open">Opens (minutes before)</label>
+            <input class="input" id="c-open" name="check_in_minutes_before" form="registration-form"
+                   type="number" min="5" max="1440" value="${tournament.check_in_minutes_before}">
+          </div>
+          <div class="field">
+            <label class="label" for="c-close">Closes (minutes before)</label>
+            <input class="input" id="c-close" name="check_in_close_minutes" form="registration-form"
+                   type="number" min="0" max="1440" value="${tournament.check_in_close_minutes}">
+          </div>
+          <div class="field">
+            <label class="label" for="c-reveal">Default room reveal (minutes before)</label>
+            <input class="input" id="c-reveal" name="default_reveal_minutes" form="registration-form"
+                   type="number" min="0" max="240" value="${tournament.default_reveal_minutes}">
+          </div>
+        </form>
+
+        <div class="row-between mt-3">
+          <a class="small" href="/admin/t/${tournamentId}/registrations" style="color:var(--primary-2)">
+            Review registrations &rarr;</a>
+          <button class="btn btn-primary" data-act="save-registration" data-busy-label="Saving">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-body">${shareBox(`/tournament/${tournament.slug}/register`, { label: 'Registration link' })}</div>
+    </div>`;
+}
+
+function rulesTab({ tournament }) {
+  return `
+    <div class="card">
+      <div class="card-head"><h2>Tournament rules</h2>
+        <span class="small dim">Shown on the public Rules page</span></div>
+      <div class="card-body">
+        <p class="muted small">
+          Formatting is preserved; scripts, embeds and inline styles are stripped when saved,
+          because these rules are shown publicly.
+        </p>
+        ${editorMarkup('rules-editor', tournament.rules_html || '', 'Match rules, code of conduct, disqualification policy...')}
+
+        <div class="field mt-3">
+          <label class="label" for="entry-requirements">Entry requirements</label>
+          <textarea class="textarea" id="entry-requirements" rows="3"
+            placeholder="Shown on the registration page">${esc(tournament.entry_requirements || '')}</textarea>
+        </div>
+
+        <div class="row-between mt-3">
+          <a class="small" href="/tournament/${esc(tournament.slug)}/rules" target="_blank" style="color:var(--primary-2)">
+            Preview the public rules page &rarr;</a>
+          <button class="btn btn-primary" data-act="save-rules" data-busy-label="Publishing">Publish rules</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function savePresetDialog(data, ctx) {
+  modal({
+    title: 'Save scoring system',
+    size: 'narrow',
+    body: `
+      <p class="muted small">Captures this tournament's placement points, kill points and tie-breakers so you can reuse them.</p>
+      <form id="preset-form" class="col mt-2" style="gap:12px">
+        <div class="field">
+          <label class="label" for="pre-name">Name</label>
+          <input class="input" id="pre-name" name="name" required value="${esc(data.tournament.name)} Scoring">
+        </div>
+        <div class="field">
+          <label class="label" for="pre-desc">Description</label>
+          <textarea class="textarea" id="pre-desc" name="description" rows="2"></textarea>
+        </div>
+      </form>`,
+    footer: `
+      <button class="btn" data-modal-close>Cancel</button>
+      <button class="btn btn-primary" id="do-preset" data-busy-label="Saving">Save</button>`,
+    onMount(overlay, close) {
+      overlay.querySelector('#do-preset').addEventListener('click', async (e) => {
+        const values = formData(overlay.querySelector('#preset-form'));
+        await withBusy(e.currentTarget, async () => {
+          await api.post('/api/scoring-presets', {
+            ...values, game: data.tournament.game, tournament_id: data.tournamentId,
+          });
+          toast('Scoring system saved.', { type: 'success' });
+          close();
+          ctx.navigate(`/admin/t/${data.tournamentId}/settings?tab=scoring`, { replace: true });
+        });
+      });
+    },
+  });
 }
 
 // --------------------------------------------------------------- templates --
